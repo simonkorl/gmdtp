@@ -135,7 +135,7 @@ pub extern fn quiche_enable_debug_logging(
         return -1;
     }
 
-    log::set_max_level(log::LevelFilter::Info);
+    log::set_max_level(log::LevelFilter::Trace);
 
     0
 }

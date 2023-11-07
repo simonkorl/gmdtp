@@ -654,7 +654,7 @@ pub struct Config {
     max_stream_window: u64,
 
     ///gmssl state default:0
-    gm_on:u64,
+    gm_on: u64,
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
@@ -710,7 +710,7 @@ impl Config {
 
             max_connection_window: MAX_CONNECTION_WINDOW,
             max_stream_window: stream::MAX_STREAM_WINDOW,
-            gm_on:0,//default gmssl close.
+            gm_on: 0, //default gmssl close.
         })
     }
 
@@ -910,15 +910,17 @@ impl Config {
     /// 
     /// The default value is '1' On.
     pub fn set_gmssl(&mut self, v: u64) {
-        if v==1 {
+        if v == 1 {
             println!("国密开启");
-        }
-        else{
+        } else {
             println!("国密关闭");
         }
         self.gm_on = v;
     }
     
+    
+    
+
     
     /// Sets the `initial_max_stream_data_bidi_remote` transport parameter.
     ///
@@ -1253,17 +1255,15 @@ pub struct Connection {
     /// Whether to emit DATAGRAM frames in the next packet.
     emit_dgram: bool,
 
-
     /// Gmssl
     gm_on: u64,
-    gm_sm2key:  Option<crypto::SM2_KEY>,
+    gm_sm2key: Option<crypto::SM2_KEY>,
 
-    gm_sm4key:Option<crypto::SM4_KEY>,
-    gm_iv:Option<[u8;16]>,
-    
+    gm_sm4key: Option<crypto::SM4_KEY>,
+    gm_iv: Option<[u8; 16]>,
 
-    gm_readoffset:Option<u64>,
-   // gmpkey:
+    gm_readoffset: Option<u64>,
+    // gmpkey:
 }
 
 /// Creates a new server-side connection.
@@ -1668,17 +1668,13 @@ impl Connection {
 
             emit_dgram: true,
 
+            //gmssl
+            gm_on: config.gm_on,
+            gm_sm2key: None,
 
-             //gmssl
-
-             gm_on:config.gm_on,
-             gm_sm2key:None,
-             
-    
-             gm_sm4key:None,
-             gm_iv:None,
-             gm_readoffset:None,
-
+            gm_sm4key: None,
+            gm_iv: None,
+            gm_readoffset: None,
         };
 
         if let Some(odcid) = odcid {
@@ -2302,57 +2298,153 @@ impl Connection {
         #[cfg(feature = "qlog")]
         let mut qlog_frames = vec![];
 
-        let mut payload:octets::Octets;
-    
-        if self.gm_on==6 &&self.is_established() {
-            if self.gm_readoffset.is_some(){
-                self.gm_readoffset=None;
-                payload = packet::decrypt_pkt(
-                    &mut b,
-                    pn,
-                    pn_len,
-                    payload_len,
-                    aead,
-                )
-                .map_err(|e| {
-                    drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
-                })?;
-        
-            }else{
-                payload = packet::decrypt_pktgm(
-                    &mut b,
-                    pn,
-                    pn_len,
-                    payload_len,
-                    aead,
-                    self.gm_on,
-                    self.is_established(),&self.gm_iv.unwrap(),self.gm_sm4key.as_ref().unwrap(),
-                )
-        
-                 
-                .map_err(|e| {
-                    drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
-                })?;
+        let mut payload: octets::Octets;
+
+        //TODO: choose decryption method
+        if self.gm_on == 6 && self.is_established() {
+            if self.gm_readoffset.is_some() {
+                trace!("use default decrypt and clear readoffset");
+                self.gm_readoffset = None;
+                payload =
+                    packet::decrypt_pkt(&mut b, pn, pn_len, payload_len, aead)
+                        .map_err(|e| {
+                            drop_pkt_on_err(
+                                e,
+                                self.recv_count,
+                                self.is_server,
+                                &self.trace_id,
+                            )
+                        })?;
+            } else {
+                // TODO: 这里可能存在一种情况：自认为已经建立了链接
+                // TODO: 但是对方需要数据重传，这种情况下最简单的方法就是
+                // TODO: 检查一次 frame 是否有不可解析的，
+                // TODO: 如果有那么按照原来的方法再解密一次
+                if hdr.ty == packet::Type::Handshake
+                    || hdr.ty == packet::Type::Initial
+                {
+                    // TODO: 根据流程，所有的 handshake 包必然不是用国密算法加密的
+                    trace!("use default decrypt when gm_on == 6 and handshake");
+                    payload = packet::decrypt_pkt(
+                        &mut b,
+                        pn,
+                        pn_len,
+                        payload_len,
+                        aead,
+                    )
+                    .map_err(|e| {
+                        drop_pkt_on_err(
+                            e,
+                            self.recv_count,
+                            self.is_server,
+                            &self.trace_id,
+                        )
+                    })?;
+                    if !self.is_server && hdr.ty == packet::Type::Handshake {
+                        trace!("set client gm_on to 3");
+                        self.gm_on = 3;
+                    } else if !self.is_server && hdr.ty == packet::Type::Initial {
+                        trace!("set client gm_on to 1");
+                        self.gm_on = 1;
+                    }
+                } else {
+                    trace!("use gm decrypt");
+                    payload = packet::decrypt_pktgm(
+                        &mut b,
+                        pn,
+                        pn_len,
+                        payload_len,
+                        aead,
+                        self.gm_on,
+                        self.is_established(),
+                        &self.gm_iv.unwrap(),
+                        self.gm_sm4key.as_ref().unwrap(),
+                    )
+                    .map_err(|e| {
+                        drop_pkt_on_err(
+                            e,
+                            self.recv_count,
+                            self.is_server,
+                            &self.trace_id,
+                        )
+                    })?;
+                }
             }
-  
+        } else if self.gm_on == 5 {
+            // 此时有两种可能：对方收到了 sm4 密钥、对方尚未收到 sm4 密钥
+            // 我们先使用 default decrypt ，如果发生错误则用国密算法处理
+            if self.is_server {
+                if self.gm_readoffset.is_some() {
+                    trace!("use default decrypt and clear readoffset");
+                    self.gm_on = 6;
+                    self.gm_readoffset = None;
+                    payload = packet::decrypt_pkt(
+                        &mut b,
+                        pn,
+                        pn_len,
+                        payload_len,
+                        aead,
+                    )
+                    .map_err(|e| {
+                        trace!("error using default decrypt!");
+                        drop_pkt_on_err(
+                            e,
+                            self.recv_count,
+                            self.is_server,
+                            &self.trace_id,
+                        )
+                    })?;
+                    trace!("gm_on: {}", self.gm_on);
+                } else {
+                    unreachable!();
+                }
+            } else {
+                if let Ok(p) =
+                    packet::decrypt_pkt(&mut b, pn, pn_len, payload_len, aead)
+                {
+                    payload = p;
+                } else {
+                    trace!("error using default decrypt! try to use gm decrypt");
+                    payload = packet::decrypt_pktgm(
+                        &mut b,
+                        pn,
+                        pn_len,
+                        payload_len,
+                        aead,
+                        self.gm_on,
+                        self.is_established(),
+                        &self.gm_iv.unwrap(),
+                        self.gm_sm4key.as_ref().unwrap(),
+                    )
+                    .map_err(|e| {
+                        trace!("error using gm decrypt. give up");
+                        drop_pkt_on_err(
+                            e,
+                            self.recv_count,
+                            self.is_server,
+                            &self.trace_id,
+                        )
+                    })?;
+                }
+            }
+        } else {
+            trace!(
+                "use default decrypt, {} {}",
+                self.gm_on,
+                self.is_established()
+            );
+            payload = packet::decrypt_pkt(&mut b, pn, pn_len, payload_len, aead)
+                .map_err(|e| {
+                    trace!("error using default decrypt!");
+                    drop_pkt_on_err(
+                        e,
+                        self.recv_count,
+                        self.is_server,
+                        &self.trace_id,
+                    )
+                })?;
         }
-        else{
-         payload = packet::decrypt_pkt(
-            &mut b,
-            pn,
-            pn_len,
-            payload_len,
-            aead,
-        )
 
-       
-        .map_err(|e| {
-            drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
-        })?;
-
-    }
- 
-    
         if self.pkt_num_spaces[epoch].recv_pkt_num.contains(pn) {
             trace!("{} ignored duplicate packet {}", self.trace_id, pn);
             return Err(Error::Done);
@@ -2585,15 +2677,17 @@ impl Connection {
         // the client's address to be verified.
         if self.is_server && hdr.ty == packet::Type::Handshake {
             self.drop_epoch_state(packet::EPOCH_INITIAL, now);
-         
-            if self.gm_on==4{
-                self.gm_on=6;
-                self.gm_readoffset=Some(1);
- 
+
+            if self.gm_on == 4 {
+                self.gm_on = 6;
+                self.gm_readoffset = Some(1);
             }
             self.verified_peer_address = true;
         }
  
+ 
+
+
 
         self.ack_eliciting_sent = false;
 
@@ -3441,125 +3535,119 @@ impl Connection {
                     }
                 }
             }
-        }
 
+            // Create GmsslCryptoFrame
+            if self.gm_on == 1
+                && self.is_server
+                && pkt_type == packet::Type::Handshake
+            {
+                //let (ctx,pk,sk) =signature::getSm2key();
+                let mut sm2key = crypto::SM2_KEY {
+                    x: [0; 32],
+                    y: [0; 32],
+                    private_key: [0; 32],
+                };
 
-         //createGmsslCryptoFrame
-       
-        //it wont affect the crypto stream,since it carries gm imformation in the type crypto.
-        // if it is server and gmssl is 1,then general the sm2 key and push to crypto frame
- 
-        if self.gm_on==1 && self.is_server
-        {   
-            //let (ctx,pk,sk) =signature::getSm2key();
-            let mut sm2key=crypto::SM2_KEY{
-                x:[0;32],
-                y:[0;32],
-                private_key:[0;32],
-            };
+                unsafe {
+                    crypto::sm2_key_generate(&mut sm2key);
+                };
+                let mut pubkey: [u8; 64] = [0; 64];
+                //extract pubkey
+                for index in 0..32 {
+                    pubkey[index] = sm2key.x[index];
+                    pubkey[index + 32] = sm2key.y[index];
+                }
 
-            unsafe {
-                crypto::sm2_key_generate(&mut sm2key);
-            }; 
-            let mut pubkey:[u8;64]=[0;64];
-            //extract pubkey
-            for  index in 0..32 {
-              pubkey[index]=sm2key.x[index];
-              pubkey[index+32]=sm2key.y[index];
-             }
- 
-            self.gm_sm2key=Some(sm2key);
- 
-           let mut pk_raw = pubkey.to_vec();
+                self.gm_sm2key = Some(sm2key);
 
-            let mut gmhdr="gmssl".as_bytes().to_vec();
-            gmhdr.append(&mut pk_raw);
-           
-        
-            let gmcrypto_buf=RangeBuf::from(&gmhdr[..], 0, true);
-            //temporary solution :using normal padding frame.
-            let frame = frame::Frame::Crypto { data: gmcrypto_buf };
-            self.gm_on=2;
-    
+                let mut pk_raw = pubkey.to_vec();
 
-            if push_frame_to_pkt!(b, frames, frame, left) {
+                let mut gmhdr = "gmssl".as_bytes().to_vec();
+                gmhdr.append(&mut pk_raw);
+
+                let gmcrypto_buf = RangeBuf::from(&gmhdr[..], 0, true);
+                //temporary solution :using normal padding frame.
+                let frame = frame::Frame::CryptoGm { data: gmcrypto_buf };
+                self.gm_on = 2;
+
+                if push_frame_to_pkt!(b, frames, frame, left) {
+                    ack_eliciting = true;
+                    in_flight = true;
+                    has_data = true;
+                }
+
                 ack_eliciting = true;
                 in_flight = true;
-                has_data = true;
             }
+            //client and have recieve pubkey,general key and encrypt it with pub,and sent.
+            else if self.gm_on == 3
+                && !self.is_server
+                && pkt_type == packet::Type::Handshake
+            {
+                const keylen: usize = 16;
+                const sm2extend: usize = 200;
+                let mut key: [u8; 16] = [0; 16];
+                rand::rand_bytes(&mut key);
+                //  let key = signature::rand_block();
+                let mut iv: [u8; keylen] = [0; keylen];
 
-            ack_eliciting = true;
-            in_flight = true;
-        }
-        //client and have recieve pubkey,general key and encrypt it with pub,and sent.
-        else if self.gm_on==3 && !self.is_server{
-            const keylen:usize=16;
-            const sm2extend:usize=200;
-            let mut key:[u8;16]=[0;16];
-            rand::rand_bytes(&mut key);
-          //  let key = signature::rand_block();
-          let mut iv:[u8;keylen]=[0;keylen];
+                let mut sm4key = crypto::SM4_KEY { rk: [0; 32] };
+                unsafe {
+                    crypto::sm4_set_encrypt_key(&mut sm4key, key.as_mut_ptr());
+                };
 
-            let mut sm4key=crypto::SM4_KEY{
-                rk:[0;32],
-            };
-            unsafe {
-                crypto::sm4_set_encrypt_key(&mut sm4key, key.as_mut_ptr());
-            }; 
-            
-            self.gm_sm4key=Some(sm4key);
-            self.gm_iv=Some(iv);
+                self.gm_sm4key = Some(sm4key);
+                self.gm_iv = Some(iv);
 
-            let mut plain_text=key.to_vec();
-            let mut veciv=iv.to_vec();
+                let mut plain_text = key.to_vec();
+                let mut veciv = iv.to_vec();
 
-            plain_text.append(&mut veciv);
-         //   debug!("\n\n\n\npoint1\n");
-            let mut gmhdr="gmssl".as_bytes().to_vec();
-         //   debug!("\n\n\n\npoint2\n");
-            
-         
-           let mut pubkey:[u8;64]=[0;64];
-      
-           let sm2key=self.gm_sm2key.as_ref().unwrap();
-          // let f=self.gm_sm2key.unwrap();//(相当于初始化一个f，在c里边，会把右边的值赋值给f，但是rust不知道这个结构该怎么赋值)
-           //extract pubkey
-           for  i in 0..32 {
-                pubkey[i]=sm2key.x[i];
-                pubkey[i+32]=sm2key.y[i];
-            }
-            let mut sm2cipher:[u8;keylen*2+sm2extend]=[0;keylen*2+sm2extend];
-           let mut sm2cipherlen:usize=0;
-           unsafe{
-            crypto::sm2_pub_encrypt(pubkey.as_ptr(), plain_text[..].as_ptr(), 
-            32, sm2cipher.as_mut_ptr(), 
-            &mut sm2cipherlen)
-            };
+                plain_text.append(&mut veciv);
+                //   debug!("\n\n\n\npoint1\n");
+                let mut gmhdr = "gmssl".as_bytes().to_vec();
+                //   debug!("\n\n\n\npoint2\n");
 
-           //let mut cipher_text: Vec<u8> = ectx.encrypt(&plain_text[..]);
-           let mut cipher_text=sm2cipher[0..sm2cipherlen].to_vec();
-       
-           gmhdr.append(&mut cipher_text);
-     
-       
-           let sm4cryptobuf=RangeBuf::from(&gmhdr[..], 0, true);
-            let frame = frame::Frame::Crypto { data: sm4cryptobuf };
-            self.gm_on=4;
-            
-            if push_frame_to_pkt!(b, frames, frame, left) {
+                let mut pubkey: [u8; 64] = [0; 64];
+
+                let sm2key = self.gm_sm2key.as_ref().unwrap();
+                // let f=self.gm_sm2key.unwrap();//(相当于初始化一个f，在c里边，会把右边的值赋值给f，但是rust不知道这个结构该怎么赋值)
+                //extract pubkey
+                for i in 0..32 {
+                    pubkey[i] = sm2key.x[i];
+                    pubkey[i + 32] = sm2key.y[i];
+                }
+                let mut sm2cipher: [u8; keylen * 2 + sm2extend] =
+                    [0; keylen * 2 + sm2extend];
+                let mut sm2cipherlen: usize = 0;
+                unsafe {
+                    crypto::sm2_pub_encrypt(
+                        pubkey.as_ptr(),
+                        plain_text[..].as_ptr(),
+                        32,
+                        sm2cipher.as_mut_ptr(),
+                        &mut sm2cipherlen,
+                    )
+                };
+
+                //let mut cipher_text: Vec<u8> = ectx.encrypt(&plain_text[..]);
+                let mut cipher_text = sm2cipher[0..sm2cipherlen].to_vec();
+
+                gmhdr.append(&mut cipher_text);
+
+                let sm4cryptobuf = RangeBuf::from(&gmhdr[..], 0, true);
+                let frame = frame::Frame::CryptoGm { data: sm4cryptobuf };
+                self.gm_on = 4;
+
+                if push_frame_to_pkt!(b, frames, frame, left) {
+                    ack_eliciting = true;
+                    in_flight = true;
+                    has_data = true;
+                }
+
                 ack_eliciting = true;
                 in_flight = true;
-                has_data = true;
             }
-
-
-            ack_eliciting = true;
-            in_flight = true;
         }
-           
-
-
-
 
         // The preference of data-bearing frame to include in a packet
         // is managed by `self.emit_dgram`. However, whether any frames
@@ -3974,10 +4062,11 @@ impl Connection {
             Some(ref v) => v,
             None => return Err(Error::InvalidState),
         };
-   
-        let mut written=0;
-        if self.gm_on==6 && self.is_established(){
-             written = packet::encrypt_pktgm(
+
+        let mut written = 0;
+        if self.gm_on == 6 && self.is_established() {
+            trace!("use gm encrypt");
+            written = packet::encrypt_pktgm(
                 &mut b,
                 pn,
                 pn_len,
@@ -3986,10 +4075,16 @@ impl Connection {
                 None,
                 aead,
                 self.gm_on,
-                self.is_established(),&self.gm_iv.unwrap(),self.gm_sm4key.as_ref().unwrap(),
+                self.is_established(),
+                &self.gm_iv.unwrap(),
+                self.gm_sm4key.as_ref().unwrap(),
             )?;
-        }
-        else{
+        } else {
+            trace!(
+                "use default encrypt, {} {}",
+                self.gm_on,
+                self.is_established()
+            );
             written = packet::encrypt_pkt(
                 &mut b,
                 pn,
@@ -4001,6 +4096,9 @@ impl Connection {
             )?;
         }
    
+   
+
+
 
         let sent_pkt = recovery::Sent {
             pkt_num: pn,
@@ -4047,11 +4145,9 @@ impl Connection {
 
         // On the client, drop initial state after sending an Handshake packet.
         if !self.is_server && hdr.ty == packet::Type::Handshake {
-            if self.gm_on == 4{
-                self.gm_on=6;
-               
-                 }
-
+            if self.gm_on == 4 {
+                self.gm_on = 6;
+            }
             self.drop_epoch_state(packet::EPOCH_INITIAL, now);
         }
 
@@ -5961,96 +6057,165 @@ impl Connection {
             },
 
             frame::Frame::Crypto { data } => {
+                if data[0..5] == "gmssl".as_bytes().to_vec() {
+                    if self.gm_on == 2 && self.is_server {
+                        let enc_sm4key = data[5..].to_vec();
 
+                        let klen = 16 + 16;
+                        //  let sm2=self.gm_skey.clone().unwrap();
 
-                if data[0..5]=="gmssl".as_bytes().to_vec(){
-                    if self.gm_on==2 && self.is_server {
-                        let enc_sm4key=data[5..].to_vec();
-                        
-                        let klen=16+16;
-                      //  let sm2=self.gm_skey.clone().unwrap();
-                        
                         //let plain_text=DecryptCtx::new(klen, sk).decrypt(&enc_sm4key);
-                        let mut plain_text:[u8;32]=[0;32];
-                        let mut inrag:usize=0;
-                        unsafe{
-
-                            crypto::sm2_decrypt(self.gm_sm2key.as_ref().unwrap(), enc_sm4key[..].as_ptr(),
-                            enc_sm4key.len(), plain_text.as_mut_ptr(), &mut inrag)
+                        let mut plain_text: [u8; 32] = [0; 32];
+                        let mut inrag: usize = 0;
+                        unsafe {
+                            crypto::sm2_decrypt(
+                                self.gm_sm2key.as_ref().unwrap(),
+                                enc_sm4key[..].as_ptr(),
+                                enc_sm4key.len(),
+                                plain_text.as_mut_ptr(),
+                                &mut inrag,
+                            )
                         };
 
-           
-
-                        let mut sm4keyvec=plain_text[0..16].to_vec();
-                        let mut iv:[u8;16]=[0;16];
-                        for i in 16..32{
-                            iv[i-16]=plain_text[i];
+                        let mut sm4keyvec = plain_text[0..16].to_vec();
+                        let mut iv: [u8; 16] = [0; 16];
+                        for i in 16..32 {
+                            iv[i - 16] = plain_text[i];
                         }
-                   
-                  
-                      let mut sm4key=crypto::SM4_KEY{
-                        rk:[0;32],
-                     };
-                     
-                     unsafe {
-                        crypto::sm4_set_encrypt_key(&mut sm4key, sm4keyvec.as_mut_ptr());
-                    }; 
-                    
-                    self.gm_sm4key=Some(sm4key);
-                    
-                        self.gm_iv=Some(iv);
-                               self.gm_on=4;
-                             
-                    }
-                    else if self.gm_on==1 &&!self.is_server{
 
-                        let pk_raw=data[5..].to_vec();
+                        let mut sm4key = crypto::SM4_KEY { rk: [0; 32] };
 
-                        let mut sm2key=crypto::SM2_KEY{
-                            x:[0;32],
-                            y:[0;32],
-                            private_key:[0;32],
+                        unsafe {
+                            crypto::sm4_set_encrypt_key(
+                                &mut sm4key,
+                                sm4keyvec.as_mut_ptr(),
+                            );
                         };
 
-                        for  i in 0..32 {
-                            sm2key.x[i]=pk_raw[i];
-                            sm2key.y[i]=pk_raw[i+32];
+                        self.gm_sm4key = Some(sm4key);
+
+                        self.gm_iv = Some(iv);
+                        self.gm_on = 4;
+                    } else if self.gm_on == 1 && !self.is_server {
+                        let pk_raw = data[5..].to_vec();
+
+                        let mut sm2key = crypto::SM2_KEY {
+                            x: [0; 32],
+                            y: [0; 32],
+                            private_key: [0; 32],
+                        };
+
+                        for i in 0..32 {
+                            sm2key.x[i] = pk_raw[i];
+                            sm2key.y[i] = pk_raw[i + 32];
                         }
 
-                    self.gm_sm2key=Some(sm2key);
-   
-                        self.gm_on=3;
-             
-                      
-                    }else if self.gm_on==0{
-                
-                            self.close(false, Error::InvalidFrame.to_wire(), b"Invalid Gmssl frame").ok();
+                        self.gm_sm2key = Some(sm2key);
+
+                        self.gm_on = 3;
+                    } else if self.gm_on == 0 {
+                        self.close(
+                            false,
+                            Error::InvalidFrame.to_wire(),
+                            b"Invalid Gmssl frame",
+                        )
+                        .ok();
                     }
                 }
                 //server recv encrypted key by sm2
-                else{
-                // Push the data to the stream so it can be re-ordered.
-                self.pkt_num_spaces[epoch].crypto_stream.recv.write(data)?;
+                else {
+                    // Push the data to the stream so it can be re-ordered.
+                    self.pkt_num_spaces[epoch].crypto_stream.recv.write(data)?;
 
-                // Feed crypto data to the TLS state, if there's data
-                // available at the expected offset.
-                let mut crypto_buf = [0; 512];
+                    // Feed crypto data to the TLS state, if there's data
+                    // available at the expected offset.
+                    let mut crypto_buf = [0; 512];
 
-                let level = crypto::Level::from_epoch(epoch);
+                    let level = crypto::Level::from_epoch(epoch);
 
-                let stream = &mut self.pkt_num_spaces[epoch].crypto_stream;
+                    let stream = &mut self.pkt_num_spaces[epoch].crypto_stream;
 
-                while let Ok((read, _)) = stream.recv.emit(&mut crypto_buf) {
-                    let recv_buf = &crypto_buf[..read];
-                    self.handshake.provide_data(level, recv_buf)?;
+                    while let Ok((read, _)) = stream.recv.emit(&mut crypto_buf) {
+                        let recv_buf = &crypto_buf[..read];
+                        self.handshake.provide_data(level, recv_buf)?;
+                    }
+
+                    self.do_handshake()?;
                 }
-
-                self.do_handshake()?;
-                  }
             },
 
             frame::Frame::CryptoHeader { .. } => unreachable!(),
-            
+
+            frame::Frame::CryptoGm { data } => {
+                if data[0..5] == "gmssl".as_bytes().to_vec() {
+                    if self.gm_on == 2 && self.is_server {
+                        let enc_sm4key = data[5..].to_vec();
+
+                        let klen = 16 + 16;
+                        //  let sm2=self.gm_skey.clone().unwrap();
+
+                        //let plain_text=DecryptCtx::new(klen, sk).decrypt(&enc_sm4key);
+                        let mut plain_text: [u8; 32] = [0; 32];
+                        let mut inrag: usize = 0;
+                        unsafe {
+                            crypto::sm2_decrypt(
+                                self.gm_sm2key.as_ref().unwrap(),
+                                enc_sm4key[..].as_ptr(),
+                                enc_sm4key.len(),
+                                plain_text.as_mut_ptr(),
+                                &mut inrag,
+                            )
+                        };
+
+                        let mut sm4keyvec = plain_text[0..16].to_vec();
+                        let mut iv: [u8; 16] = [0; 16];
+                        for i in 16..32 {
+                            iv[i - 16] = plain_text[i];
+                        }
+
+                        let mut sm4key = crypto::SM4_KEY { rk: [0; 32] };
+
+                        unsafe {
+                            crypto::sm4_set_encrypt_key(
+                                &mut sm4key,
+                                sm4keyvec.as_mut_ptr(),
+                            );
+                        };
+
+                        self.gm_sm4key = Some(sm4key);
+
+                        self.gm_iv = Some(iv);
+                        self.gm_on = 4;
+                    } else if self.gm_on == 1 && !self.is_server {
+                        let pk_raw = data[5..].to_vec();
+
+                        let mut sm2key = crypto::SM2_KEY {
+                            x: [0; 32],
+                            y: [0; 32],
+                            private_key: [0; 32],
+                        };
+
+                        for i in 0..32 {
+                            sm2key.x[i] = pk_raw[i];
+                            sm2key.y[i] = pk_raw[i + 32];
+                        }
+
+                        self.gm_sm2key = Some(sm2key);
+
+                        self.gm_on = 3;
+                    } else if self.gm_on == 0 {
+                        self.close(
+                            false,
+                            Error::InvalidFrame.to_wire(),
+                            b"Invalid Gmssl frame",
+                        )
+                        .ok();
+                    }
+                } else {
+                    unreachable!();
+                }
+            },
+
             // TODO: implement stateless retry
             frame::Frame::NewToken { .. } => (),
 

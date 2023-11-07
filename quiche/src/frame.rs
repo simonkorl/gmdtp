@@ -188,6 +188,10 @@ pub enum Frame {
         block_deadline: u64,
         started_at: u64,
     },
+
+    CryptoGm {
+        data: stream::RangeBuf,
+    },
 }
 
 impl Frame {
@@ -329,7 +333,15 @@ impl Frame {
 
             0x30 | 0x31 => parse_datagram_frame(frame_type, b)?,
 
-            _ => return Err(Error::InvalidFrame),
+            0x42 => {
+                let offset = b.get_varint()?;
+                let data = b.get_bytes_with_varint_length()?;
+                let data = stream::RangeBuf::from(data.as_ref(), offset, false);
+
+                Frame::CryptoGm { data }
+            },
+
+            _ => return { Err(Error::InvalidFrame) },
         };
 
         let allowed = match (pkt, &frame) {
@@ -340,6 +352,7 @@ impl Frame {
             // RETIRE_CONNECTION_ID can't be sent on 0-RTT packets.
             (packet::Type::ZeroRTT, Frame::ACK { .. }) => false,
             (packet::Type::ZeroRTT, Frame::Crypto { .. }) => false,
+            (packet::Type::ZeroRTT, Frame::CryptoGm { .. }) => false,
             (packet::Type::ZeroRTT, Frame::HandshakeDone) => false,
             (packet::Type::ZeroRTT, Frame::NewToken { .. }) => false,
             (packet::Type::ZeroRTT, Frame::PathResponse { .. }) => false,
@@ -350,6 +363,7 @@ impl Frame {
             // types.
             (_, Frame::ACK { .. }) => true,
             (_, Frame::Crypto { .. }) => true,
+            (_, Frame::CryptoGm { .. }) => true,
             (_, Frame::ConnectionClose { .. }) => true,
 
             // All frames are allowed on 0-RTT and 1-RTT packets.
@@ -612,6 +626,24 @@ impl Frame {
                 b.put_varint(*block_deadline)?;
                 b.put_varint(*started_at)?;
             },
+
+            Frame::CryptoGm { data } => {
+                fn encode_cryptogm_header(
+                    offset: u64, length: u64, b: &mut octets::OctetsMut,
+                ) -> Result<()> {
+                    b.put_varint(0x42)?;
+
+                    b.put_varint(offset)?;
+
+                    // Always encode length field as 2-byte varint.
+                    b.put_varint_with_len(length, 2)?;
+
+                    Ok(())
+                }
+                encode_cryptogm_header(data.off() as u64, data.len() as u64, b)?;
+
+                b.put_bytes(data)?;
+            },
         }
 
         Ok(before - b.cap())
@@ -663,9 +695,9 @@ impl Frame {
                 }
 
                 if let Some(ecn) = ecn_counts {
-                    len += octets::varint_len(ecn.ect0_count) +
-                        octets::varint_len(ecn.ect1_count) +
-                        octets::varint_len(ecn.ecn_ce_count);
+                    len += octets::varint_len(ecn.ect0_count)
+                        + octets::varint_len(ecn.ect1_count)
+                        + octets::varint_len(ecn.ecn_ce_count);
                 }
 
                 len
@@ -854,6 +886,13 @@ impl Frame {
                 octets::varint_len(*block_deadline) + // block_deadline
                 octets::varint_len(*started_at) // started_at
             },
+
+            Frame::CryptoGm { data } => {
+                1 + // frame type
+                octets::varint_len(data.off() as u64) + // offset
+                2 + // length, always encode as 2-byte varint
+                data.len() // data
+            },
         }
     }
 
@@ -861,10 +900,10 @@ impl Frame {
         // Any other frame is ack-eliciting (note the `!`).
         !matches!(
             self,
-            Frame::Padding { .. } |
-                Frame::ACK { .. } |
-                Frame::ApplicationClose { .. } |
-                Frame::ConnectionClose { .. }
+            Frame::Padding { .. }
+                | Frame::ACK { .. }
+                | Frame::ApplicationClose { .. }
+                | Frame::ConnectionClose { .. }
         )
     }
 
@@ -980,14 +1019,16 @@ impl Frame {
                 maximum: *max,
             },
 
-            Frame::DataBlocked { limit } =>
-                QuicFrame::DataBlocked { limit: *limit },
+            Frame::DataBlocked { limit } => {
+                QuicFrame::DataBlocked { limit: *limit }
+            },
 
-            Frame::StreamDataBlocked { stream_id, limit } =>
+            Frame::StreamDataBlocked { stream_id, limit } => {
                 QuicFrame::StreamDataBlocked {
                     stream_id: *stream_id,
                     limit: *limit,
-                },
+                }
+            },
 
             Frame::StreamsBlockedBidi { limit } => QuicFrame::StreamsBlocked {
                 stream_type: StreamType::Bidirectional,
@@ -1017,13 +1058,15 @@ impl Frame {
                 }),
             },
 
-            Frame::RetireConnectionId { seq_num } =>
+            Frame::RetireConnectionId { seq_num } => {
                 QuicFrame::RetireConnectionId {
                     sequence_number: *seq_num as u32,
-                },
+                }
+            },
 
-            Frame::PathChallenge { .. } =>
-                QuicFrame::PathChallenge { data: None },
+            Frame::PathChallenge { .. } => {
+                QuicFrame::PathChallenge { data: None }
+            },
 
             Frame::PathResponse { .. } => QuicFrame::PathResponse { data: None },
 
@@ -1037,14 +1080,15 @@ impl Frame {
                 trigger_frame_type: None, // don't know trigger type
             },
 
-            Frame::ApplicationClose { error_code, reason } =>
+            Frame::ApplicationClose { error_code, reason } => {
                 QuicFrame::ConnectionClose {
                     error_space: Some(ErrorSpace::ApplicationError),
                     error_code: Some(*error_code),
                     raw_error_code: None, // raw error is no different for us
                     reason: Some(String::from_utf8(reason.clone()).unwrap()),
                     trigger_frame_type: None, // don't know trigger type
-                },
+                }
+            },
 
             Frame::HandshakeDone => QuicFrame::HandshakeDone,
 
@@ -1071,6 +1115,10 @@ impl Frame {
                 block_priority: *block_priority,
                 block_deadline: *block_deadline,
                 started_at: *started_at,
+            },
+            Frame::CryptoGm { data } => QuicFrame::Crypto {
+                offset: data.off(),
+                length: data.len() as u64,
             },
         }
     }
@@ -1264,6 +1312,9 @@ impl std::fmt::Debug for Frame {
                     "BLOCK_INFO stream={} size={} priority={} deadline={} started_at={}",
                     stream_id, block_size, block_priority, block_deadline, started_at
                 )?;
+            },
+            Frame::CryptoGm { data } => {
+                write!(f, "CRYPTO_GM off={} len={}", data.off(), data.len())?;
             },
         }
 

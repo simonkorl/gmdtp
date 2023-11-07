@@ -35,7 +35,7 @@ use crate::crypto;
 use crate::rand;
 use crate::ranges;
 use crate::stream;
- 
+
 const FORM_BIT: u8 = 0x80;
 const FIXED_BIT: u8 = 0x40;
 const KEY_PHASE_BIT: u8 = 0x04;
@@ -121,8 +121,9 @@ impl Type {
 
             Type::ZeroRTT => qlog::events::quic::PacketType::ZeroRtt,
 
-            Type::VersionNegotiation =>
-                qlog::events::quic::PacketType::VersionNegotiation,
+            Type::VersionNegotiation => {
+                qlog::events::quic::PacketType::VersionNegotiation
+            },
 
             Type::Short => qlog::events::quic::PacketType::OneRtt,
         }
@@ -298,22 +299,19 @@ impl<'a> Header<'a> {
         let mut b = octets::OctetsMut::with_slice(buf);
         Header::from_bytes(&mut b, dcid_len)
     }
- 
-      pub fn get_headerAll(buf: &mut [u8], dcid_len: usize) -> (usize,usize) {
-     
+
+    pub fn get_headerAll(buf: &mut [u8], dcid_len: usize) -> (usize, usize) {
         let mut b = octets::OctetsMut::with_slice(buf);
-        let hdr=Header::from_bytes(&mut b, dcid_len).unwrap();
+        let hdr = Header::from_bytes(&mut b, dcid_len).unwrap();
         let payload_len = if hdr.ty == Type::Short {
             b.cap() //whole lenth - offset(offset = 0,then cap = total lenth)
         } else {
             b.get_varint().unwrap() as usize
         };
 
-        return (payload_len,b.off());
+        return (payload_len, b.off());
     }
 
-
-    
     pub(crate) fn from_bytes<'b>(
         b: &'b mut octets::OctetsMut, dcid_len: usize,
     ) -> Result<Header<'a>> {
@@ -617,25 +615,28 @@ pub fn decode_pkt_num(largest_pn: u64, truncated_pn: u64, pn_len: usize) -> u64 
     candidate_pn
 }
 
-
 pub fn encrypt_pktgm(
     b: &mut octets::OctetsMut, pn: u64, pn_len: usize, payload_len: usize,
     payload_offset: usize, extra_in: Option<&[u8]>, aead: &crypto::Seal,
-    gm_on:u64,is_established:bool,gm_iv:&[u8;16],sm4key:*const crypto::SM4_KEY
+    gm_on: u64, is_established: bool, gm_iv: &[u8; 16],
+    sm4key: *const crypto::SM4_KEY,
 ) -> Result<usize> {
     let (mut header, mut payload) = b.split_at(payload_offset)?;
-       if  gm_on==6 &&  is_established {
-      let mut crt=gm_iv.clone();
-      unsafe {
-        crypto::sm4_ctr_encrypt_inplace(sm4key,crt.as_mut_ptr(), payload.as_mut().as_mut_ptr(),payload_len);
+    if gm_on == 6 && is_established {
+        let mut crt = gm_iv.clone();
+        unsafe {
+            crypto::sm4_ctr_encrypt_inplace(
+                sm4key,
+                crt.as_mut_ptr(),
+                payload.as_mut().as_mut_ptr(),
+                payload_len,
+            );
+        }
     }
 
-}
-
- 
     encrypt_hdr(&mut header, pn_len, payload.as_ref(), aead)?;
-   
-    Ok(payload_offset + payload_len+16)
+
+    Ok(payload_offset + payload_len + 16)
 }
 
 pub fn encrypt_pkt2(
@@ -643,29 +644,26 @@ pub fn encrypt_pkt2(
     payload_offset: usize, extra_in: Option<&[u8]>, aead: &crypto::Seal,
 ) -> Result<usize> {
     let (mut header, mut payload) = b.split_at(payload_offset)?;
- 
-    encrypt_hdr(&mut header, pn_len, payload.as_ref(), aead)?;
- 
-    Ok(payload_offset + payload_len+16)
- 
-}
 
+    encrypt_hdr(&mut header, pn_len, payload.as_ref(), aead)?;
+
+    Ok(payload_offset + payload_len + 16)
+}
 
 pub fn encrypt_pkt(
     b: &mut octets::OctetsMut, pn: u64, pn_len: usize, payload_len: usize,
     payload_offset: usize, extra_in: Option<&[u8]>, aead: &crypto::Seal,
 ) -> Result<usize> {
     let (mut header, mut payload) = b.split_at(payload_offset)?;
-     let ciphertext_len
-     = aead.seal_with_u64_counter(
+    let ciphertext_len = aead.seal_with_u64_counter(
         pn,
         header.as_ref(),
         payload.as_mut(),
         payload_len,
         extra_in,
     )?;
-     encrypt_hdr(&mut header, pn_len, payload.as_ref(), aead)?;
- 
+    encrypt_hdr(&mut header, pn_len, payload.as_ref(), aead)?;
+
     Ok(payload_offset + ciphertext_len)
 }
 
@@ -689,32 +687,34 @@ pub fn encode_pkt_num(pn: u64, b: &mut octets::OctetsMut) -> Result<()> {
 
 pub fn decrypt_pktgm<'a>(
     b: &'a mut octets::OctetsMut, pn: u64, pn_len: usize, payload_len: usize,
-    aead: &crypto::Open,gm_on:u64,is_established:bool,
-    gm_iv:&[u8;16],sm4key:*const crypto::SM4_KEY
+    aead: &crypto::Open, gm_on: u64, is_established: bool, gm_iv: &[u8; 16],
+    sm4key: *const crypto::SM4_KEY,
 ) -> Result<octets::Octets<'a>> {
     let payload_offset = b.off();
 
     let (header, mut payload) = b.split_at(payload_offset)?;
- 
-    let payload_len = payload_len
-        .checked_sub(pn_len+16)
-        .ok_or(Error::InvalidPacket)?;
- 
-    let mut ciphertext = payload.peek_bytes_mut(payload_len)?;
- 
-    if  gm_on==6 &&  is_established {
- 
-        let mut crt=gm_iv.clone();
- 
-        unsafe {
-            crypto::sm4_ctr_encrypt_inplace(sm4key,crt.as_mut_ptr(), ciphertext.as_mut().as_mut_ptr(),payload_len);
-        }
 
+    let payload_len = payload_len
+        .checked_sub(pn_len + 16)
+        .ok_or(Error::InvalidPacket)?;
+
+    let mut ciphertext = payload.peek_bytes_mut(payload_len)?;
+
+    if gm_on == 6 && is_established {
+        let mut crt = gm_iv.clone();
+
+        unsafe {
+            crypto::sm4_ctr_encrypt_inplace(
+                sm4key,
+                crt.as_mut_ptr(),
+                ciphertext.as_mut().as_mut_ptr(),
+                payload_len,
+            );
+        }
     }
- 
+
     Ok(b.get_bytes(payload_len)?)
 }
-
 
 pub fn decrypt_pkt2<'a>(
     b: &'a mut octets::OctetsMut, pn: u64, pn_len: usize, payload_len: usize,
@@ -725,13 +725,11 @@ pub fn decrypt_pkt2<'a>(
     let (header, mut payload) = b.split_at(payload_offset)?;
 
     let payload_len = payload_len
-        .checked_sub(pn_len+16)
+        .checked_sub(pn_len + 16)
         .ok_or(Error::InvalidPacket)?;
-  
 
     let mut ciphertext = payload.peek_bytes_mut(payload_len)?;
 
-      
     Ok(b.get_bytes(payload_len)?)
 }
 
@@ -742,15 +740,14 @@ pub fn decrypt_pkt<'a>(
     let payload_offset = b.off();
 
     let (header, mut payload) = b.split_at(payload_offset)?;
-     let payload_len = payload_len
+    let payload_len = payload_len
         .checked_sub(pn_len)
         .ok_or(Error::InvalidPacket)?;
-  
-      
+
     let mut ciphertext = payload.peek_bytes_mut(payload_len)?;
     let payload_len =
         aead.open_with_u64_counter(pn, header.as_ref(), ciphertext.as_mut())?;
-   
+
     Ok(b.get_bytes(payload_len)?)
 }
 
@@ -778,9 +775,6 @@ pub fn encrypt_hdr(
 
     Ok(())
 }
-
-
-
 
 pub fn negotiate_version(
     scid: &[u8], dcid: &[u8], out: &mut [u8],
@@ -880,11 +874,13 @@ fn compute_retry_integrity_tag(
     ];
 
     let (key, nonce) = match version {
-        crate::PROTOCOL_VERSION_DRAFT27 | crate::PROTOCOL_VERSION_DRAFT28 =>
-            (&RETRY_INTEGRITY_KEY_DRAFT27, RETRY_INTEGRITY_NONCE_DRAFT27),
+        crate::PROTOCOL_VERSION_DRAFT27 | crate::PROTOCOL_VERSION_DRAFT28 => {
+            (&RETRY_INTEGRITY_KEY_DRAFT27, RETRY_INTEGRITY_NONCE_DRAFT27)
+        },
 
-        crate::PROTOCOL_VERSION_DRAFT29 =>
-            (&RETRY_INTEGRITY_KEY_DRAFT29, RETRY_INTEGRITY_NONCE_DRAFT29),
+        crate::PROTOCOL_VERSION_DRAFT29 => {
+            (&RETRY_INTEGRITY_KEY_DRAFT29, RETRY_INTEGRITY_NONCE_DRAFT29)
+        },
 
         _ => (&RETRY_INTEGRITY_KEY_V1, RETRY_INTEGRITY_NONCE_V1),
     };
@@ -1038,8 +1034,8 @@ impl PktNumWindow {
 
     fn upper(&self) -> u64 {
         self.lower
-            .saturating_add(std::mem::size_of::<u128>() as u64 * 8) -
-            1
+            .saturating_add(std::mem::size_of::<u128>() as u64 * 8)
+            - 1
     }
 }
 
