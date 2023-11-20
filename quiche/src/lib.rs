@@ -911,9 +911,9 @@ impl Config {
     /// The default value is '1' On.
     pub fn set_gmssl(&mut self, v: u64) {
         if v == 1 {
-            println!("国密开启");
+            info!("国密开启");
         } else {
-            println!("国密关闭");
+            info!("国密关闭");
         }
         self.gm_on = v;
     }
