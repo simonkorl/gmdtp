@@ -2,3 +2,6 @@
 	path = quiche/deps/boringssl
 	url = https://github.com/google/boringssl.git
 	ignore = dirty
+[submodule "quiche/deps/gmssl"]
+	path = quiche/deps/gmssl
+	url = https://github.com/guanzhi/GmSSL.git
