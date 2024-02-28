@@ -24,6 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::convert::TryInto;
 use std::mem::MaybeUninit;
 
 use ring::aead;
@@ -604,13 +605,14 @@ extern {
         user_key: *mut u8,
     );
     
-
-    pub fn sm4_ctr_encrypt_inplace(
-        key:*const SM4_KEY,
-        ctr: *mut u8,
-        inbuf:*mut u8,
-        buflen:usize,
-    );
+    // 这个函数曾被额外添加到 v3.0.0 版本的 gmssl 库中
+    // 我们将其拿出来单独实现，防止库的版本更新产生问题
+    // pub fn sm4_ctr_encrypt_inplace(
+    //     key:*const SM4_KEY,
+    //     ctr: *mut u8,
+    //     inbuf:*mut u8,
+    //     buflen:usize,
+    // );
 
    
     pub fn sm2_key_generate(
@@ -618,15 +620,15 @@ extern {
 
     );
 
-    pub fn sm2_pub_encrypt(
-        pubkey:*const u8,
-        inbuf:*const u8,
-        inlen:usize,
-        outbuf:*mut u8,
-        outlen:*mut usize,
-
-    );
-
+    // 这个函数曾被额外添加到 v3.0.0 版本的 gmssl 库中
+    // 我们将其拿出来单独实现，防止库的版本更新产生问题
+    // pub fn sm2_pub_encrypt(
+    //     pubkey:*const u8,
+    //     inbuf:*const u8,
+    //     inlen:usize,
+    //     outbuf:*mut u8,
+    //     outlen:*mut usize,
+    // );
 
     pub fn sm2_decrypt(
         key:*const SM2_KEY,
@@ -635,6 +637,55 @@ extern {
         outbuf:*mut u8,
         outlen:*mut usize,
     );
+
+    fn sm4_ctr_encrypt(
+        key: *const SM4_KEY,
+        ctr: *mut u8,
+        inbuf: *mut u8,
+        buflen: usize,
+        outbuf: *mut u8,
+    );
+
+    fn sm2_encrypt(
+        key:*const SM2_KEY,
+        inbuf:*const u8,
+        inlen:usize,
+        outbuf:*mut u8,
+        outlen:*mut usize,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn sm2_pub_encrypt (
+    pubkey: *const u8,
+    inbuf:*const u8,
+    inlen:usize,
+    outbuf:*mut u8,
+    outlen:*mut usize,
+) {
+    let pubkey_slice: &[u8; 64] = unsafe { std::slice::from_raw_parts(pubkey, 64) }.try_into().unwrap();
+    let mut key = SM2_KEY {
+        x: [0u8;32],
+        y: [0u8;32],
+        private_key: [0; 32],
+    };
+    key.x.copy_from_slice(&pubkey_slice[0..32]);
+    key.y.copy_from_slice(&pubkey_slice[32..64]);
+    unsafe{ sm2_encrypt(std::ptr::addr_of!(key), inbuf, inlen, outbuf, outlen); }
+}
+
+#[no_mangle]
+pub extern "C" fn sm4_ctr_encrypt_inplace(
+        key:*const SM4_KEY,
+        ctr: *mut u8,
+        inbuf:*mut u8,
+        buflen:usize,
+    ) {
+        let mut out: Vec<u8> = Vec::new();
+        out.resize(buflen, 0);
+        unsafe { sm4_ctr_encrypt(key, ctr, inbuf, buflen, out.as_mut_ptr()); }
+        let in_slice = unsafe { std::slice::from_raw_parts_mut(inbuf, buflen) };
+        in_slice.copy_from_slice(out.as_slice());
 }
 
 #[cfg(test)]

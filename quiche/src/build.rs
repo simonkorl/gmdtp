@@ -257,12 +257,20 @@ fn main() {
     Command::new("mkdir").arg("deps/gmssl/build").status().unwrap();
     let libgmssldir = std::env::current_dir().unwrap();
     let gmdir=libgmssldir.join("deps/gmssl/build/bin");
+    
+    if cfg!(windows) {
+        let _=std::env::set_current_dir("deps/gmssl/build");
+            Command::new("cmake").arg("..").status().unwrap();
+            Command::new("cmake").arg("--build").arg(".").status().unwrap();
+            let gmlib_dir = libgmssldir.join("deps/gmssl/build/bin/Debug");
+            println!("cargo:rustc-link-search=native={}", gmlib_dir.into_os_string().into_string().unwrap());
 
-    let _=std::env::set_current_dir("deps/gmssl/build");
-    Command::new("cmake").arg("..").status().unwrap();
-    Command::new("make").status().unwrap();
-  
-    println!("cargo:rustc-link-search=native={}", gmdir.into_os_string().into_string().unwrap());
+    } else {
+        let _=std::env::set_current_dir("deps/gmssl/build");
+        Command::new("cmake").arg("..").status().unwrap();
+        Command::new("cmake").arg("--build").arg(".").status().unwrap();
+        println!("cargo:rustc-link-search=native={}", gmdir.into_os_string().into_string().unwrap());
+    }
     println!("cargo:rustc-link-lib=static=gmssl");
 
     let _=std::env::set_current_dir(curpwd);
